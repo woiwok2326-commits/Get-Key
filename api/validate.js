@@ -1,87 +1,56 @@
-const SECRET = 0x5A17C0DE;
+const KEY_SECRET = 0x5A17C0DE;
 
-function toHex(n, len) {
-  return Number(n).toString(16).toUpperCase().padStart(len, '0').slice(-len);
-}
-
-function checksum(str) {
-  let h = SECRET >>> 0;
+function keyChecksum(str) {
+  let h = KEY_SECRET >>> 0;
   for (let i = 0; i < str.length; i++) {
     h = ((h << 5) - h + str.charCodeAt(i)) >>> 0;
   }
   return h;
 }
 
-function generateKey(days) {
-  const now = Math.floor(Date.now() / 1000);
-  const expiry = now + days * 86400;
-  const expiryHex = toHex(expiry, 8);
-  const durHex = toHex(days, 4);
-  const payload = expiryHex + durHex;
-  const cs = toHex(checksum(payload + SECRET), 8);
-  const rand = toHex(Math.floor(Math.random() * 0x100000000), 8);
-  const raw = (payload + cs + rand).toUpperCase();
-  const groups = raw.match(/.{1,4}/g) || [];
-  return 'KZ-' + groups.join('-');
-}
+export default function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Content-Type', 'application/json');
 
-function normalizeKey(key) {
-  if (typeof key !== 'string') return null;
-  const cleaned = key.trim().toUpperCase();
-  const match = cleaned.match(/^KZ-([A-F0-9-]+)$/i);
-  if (!match) return null;
-  const raw = match[1].replace(/-/g, '');
-  if (raw.length !== 28) return null;
-  return raw;
-}
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
-function validateKey(key, now = Date.now() / 1000) {
-  const raw = normalizeKey(key);
-  if (!raw) return false;
+  const { key } = req.query;
 
-  if (raw.length !== 28) return false;
+  if (!key || typeof key !== 'string') {
+    return res.status(400).json({ status: 'failed', reason: 'missing_key' });
+  }
 
-  const expiryHex = raw.slice(0, 8);
-  const durHex = raw.slice(8, 12);
-  const providedChecksum = raw.slice(12, 20);
-  const randomPart = raw.slice(20, 28);
+  const clean = key.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
 
-  if (!/^[0-9A-F]{8}$/i.test(expiryHex)) return false;
-  if (!/^[0-9A-F]{4}$/i.test(durHex)) return false;
-  if (!/^[0-9A-F]{8}$/i.test(providedChecksum)) return false;
-  if (!/^[0-9A-F]{8}$/i.test(randomPart)) return false;
+  if (clean.length !== 28) {
+    return res.json({ status: 'failed', reason: 'invalid_format' });
+  }
 
-  const payload = expiryHex + durHex;
-  const expectedChecksum = toHex(checksum(payload + SECRET), 8);
-  if (providedChecksum !== expectedChecksum) return false;
+  const expiryHex = clean.substring(0, 8);
+  const durHex = clean.substring(8, 12);
+  const csHex = clean.substring(12, 20);
 
   const expiry = parseInt(expiryHex, 16);
-  const durationDays = parseInt(durHex, 16);
+  const duration = parseInt(durHex, 16);
+  const clientCs = parseInt(csHex, 16);
 
-  if (!Number.isFinite(expiry) || !Number.isFinite(durationDays)) return false;
-  if (durationDays <= 0) return false;
+  const expectedCs = keyChecksum(expiryHex + durHex + KEY_SECRET);
+  if (clientCs !== expectedCs) {
+    return res.json({ status: 'failed', reason: 'checksum_mismatch' });
+  }
 
-  return Number(now) <= expiry && expiry > 0;
-}
+  const now = Math.floor(Date.now() / 1000);
+  if (now > expiry) {
+    return res.json({ status: 'failed', reason: 'expired' });
+  }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    SECRET,
-    toHex,
-    checksum,
-    generateKey,
-    normalizeKey,
-    validateKey,
-  };
-}
-
-if (typeof globalThis !== 'undefined') {
-  globalThis.KEY_HELPERS = {
-    SECRET,
-    toHex,
-    checksum,
-    generateKey,
-    normalizeKey,
-    validateKey,
-  };
+  const expiryDate = new Date(expiry * 1000);
+  return res.json({
+    status: 'success',
+    expired: expiryDate.toISOString().split('T')[0],
+    duration_days: duration
+  });
 }
